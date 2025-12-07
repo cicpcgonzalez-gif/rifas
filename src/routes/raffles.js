@@ -44,13 +44,25 @@ router.post('/', authMiddleware, async (req, res) => {
     if (!title || !price || !totalTickets) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
+
+    // Validate numeric inputs
+    const parsedPrice = parseFloat(price);
+    const parsedTickets = parseInt(totalTickets, 10);
+
+    if (isNaN(parsedPrice) || parsedPrice <= 0) {
+      return res.status(400).json({ error: 'Price must be a valid positive number' });
+    }
+
+    if (isNaN(parsedTickets) || parsedTickets <= 0) {
+      return res.status(400).json({ error: 'Total tickets must be a valid positive integer' });
+    }
     
     const raffle = await prisma.raffle.create({
       data: {
         title,
         description,
-        price: parseFloat(price),
-        totalTickets: parseInt(totalTickets)
+        price: parsedPrice,
+        totalTickets: parsedTickets
       }
     });
     
@@ -66,13 +78,28 @@ router.put('/:id', authMiddleware, async (req, res) => {
   try {
     const { title, description, price, totalTickets, status } = req.body;
     
+    // Validate numeric inputs if provided
+    if (price !== undefined) {
+      const parsedPrice = parseFloat(price);
+      if (isNaN(parsedPrice) || parsedPrice <= 0) {
+        return res.status(400).json({ error: 'Price must be a valid positive number' });
+      }
+    }
+
+    if (totalTickets !== undefined) {
+      const parsedTickets = parseInt(totalTickets, 10);
+      if (isNaN(parsedTickets) || parsedTickets <= 0) {
+        return res.status(400).json({ error: 'Total tickets must be a valid positive integer' });
+      }
+    }
+
     const raffle = await prisma.raffle.update({
       where: { id: req.params.id },
       data: {
         ...(title && { title }),
-        ...(description && { description }),
+        ...(description !== undefined && { description }),
         ...(price && { price: parseFloat(price) }),
-        ...(totalTickets && { totalTickets: parseInt(totalTickets) }),
+        ...(totalTickets && { totalTickets: parseInt(totalTickets, 10) }),
         ...(status && { status })
       }
     });
@@ -80,6 +107,10 @@ router.put('/:id', authMiddleware, async (req, res) => {
     res.status(200).json(raffle);
   } catch (error) {
     console.error('Error updating raffle:', error);
+    // Handle Prisma not found error
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Raffle not found' });
+    }
     res.status(500).json({ error: 'Failed to update raffle' });
   }
 });
@@ -94,6 +125,10 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     res.status(200).json({ message: 'Raffle deleted successfully' });
   } catch (error) {
     console.error('Error deleting raffle:', error);
+    // Handle Prisma not found error
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Raffle not found' });
+    }
     res.status(500).json({ error: 'Failed to delete raffle' });
   }
 });
