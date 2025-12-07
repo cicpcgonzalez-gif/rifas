@@ -1,0 +1,39 @@
+// Esquema inicial para rifas-backend
+// Puedes ajustar los modelos según tus necesidades
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  role      String
+  verified  Boolean @default(false)
+  active    Boolean @default(true)
+  firstName String
+  lastName  String
+  address   String?
+  dob       DateTime?
+  cedula    String?
+  phone     String?
+  createdAt DateTime @default(now())
+  raffles   Raffle[] @relation("UserRaffles")
+}
+
+model Raffle {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  price       Float
+  status      String
+  creatorId   String
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [creatorId], references: [id], name: "UserRaffles")
+}

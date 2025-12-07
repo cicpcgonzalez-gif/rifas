@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const { v4: uuid } = require('uuid');
+const { PrismaClient } = require('@prisma/client');
 require('dotenv').config();
 
 const app = express();
@@ -39,6 +40,8 @@ const db = {
 	passwordResetTokens: new Map(), // token -> { userId, expiresAt }
 	mailLogs: [] // { id, to, subject, status, error, timestamp, provider }
 };
+
+const prisma = new PrismaClient();
 
 const createRateLimiter = (name, windowMs, limit) => {
 	const bucket = new Map();
@@ -608,6 +611,21 @@ const superadminMiddleware = (req, res, next) => {
 
 app.get('/health', (_req, res) => {
 	res.json({ ok: true, message: 'API viva' });
+});
+
+app.get('/api/status', (_req, res) => {
+	res.json({ ok: true, message: 'API viva', timestamp: Date.now() });
+});
+
+// Endpoint de rifas usando Prisma
+app.get('/api/raffles', async (_req, res) => {
+  try {
+    const raffles = await prisma.raffle.findMany();
+    res.json({ raffles });
+  } catch (error) {
+    console.error('Error al consultar rifas:', error);
+    res.status(500).json({ error: 'Error al consultar rifas' });
+  }
 });
 
 app.post('/auth/register', async (req, res) => {
