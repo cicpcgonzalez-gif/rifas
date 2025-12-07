@@ -4,8 +4,8 @@ services:
     env: node
     plan: free
     branch: main
-    buildCommand: "npm install && npm run build"
-    startCommand: "node dist/index.js"
+    buildCommand: "npm install"
+    startCommand: "npm start"
     autoDeploy: true
     envVars:
       - key: DATABASE_URL
