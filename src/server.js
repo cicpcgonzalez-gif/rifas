@@ -1163,28 +1163,38 @@ app.post('/superadmin/users/:id/security-code/regenerate', authMiddleware, super
 	return res.json({ message: 'Código regenerado', code });
 });
 
-app.patch('/me', authMiddleware, (req, res) => {
+app.put('/me', authMiddleware, (req, res) => {
 	const user = db.users.find((u) => u.id === req.user.id);
 	if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-	const { phone, address, avatar, support } = req.body || {};
+	const { phone, address, avatar, support, bio, socials } = req.body || {};
+	
 	if (phone && !validatePhone(phone)) return res.status(400).json({ error: 'Telefono invalido' });
 	if (address && String(address).trim().length < 3) return res.status(400).json({ error: 'Direccion invalida' });
 	if (support?.email && !validateEmail(support.email)) return res.status(400).json({ error: 'Email de soporte invalido' });
+
 	if (phone) user.phone = String(phone).trim();
 	if (address) user.address = String(address).trim();
 	if (avatar) user.avatar = String(avatar);
-	if (support && typeof support === 'object') {
+	if (bio) user.bio = String(bio).trim();
+
+	// Handle both 'support' (legacy/backend) and 'socials' (frontend)
+	const incomingSocials = socials || support;
+	if (incomingSocials && typeof incomingSocials === 'object') {
 		const cleanSupport = {};
 		['whatsapp', 'instagram', 'facebook', 'tiktok', 'website', 'email'].forEach((field) => {
-			if (support[field] !== undefined) cleanSupport[field] = String(support[field]).trim();
+			if (incomingSocials[field] !== undefined) cleanSupport[field] = String(incomingSocials[field]).trim();
 		});
 		user.support = { ...(user.support || {}), ...cleanSupport };
+		// Also sync to socials for frontend compatibility if needed, but frontend seems to read 'socials' from profile which might be 'support' in DB?
+		// Let's ensure the response includes 'socials' mapped from 'support'
+		user.socials = user.support; 
 	}
+
 	logActivity({
 		action: 'user.updateProfile',
 		userId: user.id,
 		organizerId: user.organizerId,
-		meta: { phone: !!phone, address: !!address, avatar: !!avatar, support: !!support }
+		meta: { phone: !!phone, address: !!address, avatar: !!avatar, support: !!user.support, bio: !!bio }
 	});
 	const { password, ...safe } = user;
 	return res.json(safe);
