@@ -1,0 +1,16 @@
+[
+  {
+    "email": "cicpcgonzalez@gmail.com",
+    "firstName": "Admin",
+    "lastName": "Seed",
+    "password": "123456789",
+    "createdAt": "2025-12-07T00:00:00.000Z"
+  },
+  {
+    "email": "rifa@megarifasapp.com",
+    "firstName": "Super",
+    "lastName": "Admin",
+    "password": "rifasadmin123",
+    "createdAt": "2025-12-07T00:00:00.000Z"
+  }
+]

@@ -6,9 +6,11 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const { v4: uuid } = require('uuid');
 const { PrismaClient } = require('@prisma/client');
+const { Expo } = require('expo-server-sdk');
 require('dotenv').config();
 
 const app = express();
+const expo = new Expo();
 const PORT = process.env.PORT || 4000;
 const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || 'rifa@megarifasapp.com').toLowerCase();
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
@@ -1266,6 +1268,13 @@ app.post('/raffles', authMiddleware, (req, res) => {
 	return res.status(201).json(raffle);
 });
 
+app.get('/raffles/:id/tickets', (req, res) => {
+	const raffle = db.raffles.find((r) => r.id === req.params.id);
+	if (!raffle) return res.status(404).json({ error: 'Rifa no encontrada' });
+	const assigned = Array.from(getAssignedNumbers(raffle.id));
+	return res.json({ taken: assigned, total: getRaffleCapacity(raffle) });
+});
+
 app.post('/raffles/:id/purchase', authMiddleware, (req, res) => {
 	const raffle = db.raffles.find((r) => r.id === req.params.id);
 	if (!raffle) return res.status(404).json({ error: 'Rifa no encontrada' });
@@ -1273,10 +1282,30 @@ app.post('/raffles/:id/purchase', authMiddleware, (req, res) => {
 	const organizer = db.users.find((u) => u.id === raffle.creatorId);
 
 	const quantity = sanitizeNumber(req.body?.quantity || 0);
-	if (!Number.isFinite(quantity) || quantity <= 0) return res.status(400).json({ error: 'Cantidad invalida' });
+	const selectedNumbers = Array.isArray(req.body?.selectedNumbers) ? req.body.selectedNumbers.map(Number) : [];
 
-	const numbers = allocateRandomNumbers(raffle, quantity);
-	if (!numbers) return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
+	if (selectedNumbers.length > 0) {
+		if (selectedNumbers.length !== quantity) return res.status(400).json({ error: 'La cantidad no coincide con los números seleccionados' });
+		
+		const assigned = getAssignedNumbers(raffle.id);
+		const capacity = getRaffleCapacity(raffle);
+		
+		for (const num of selectedNumbers) {
+			if (!Number.isFinite(num) || num < 1 || num > capacity) return res.status(400).json({ error: `Número inválido: ${num}` });
+			if (assigned.has(num)) return res.status(400).json({ error: `El número ${num} ya está ocupado` });
+		}
+	} else {
+		if (!Number.isFinite(quantity) || quantity <= 0) return res.status(400).json({ error: 'Cantidad invalida' });
+	}
+
+	let numbers;
+	if (selectedNumbers.length > 0) {
+		numbers = selectedNumbers.sort((a, b) => a - b);
+	} else {
+		numbers = allocateRandomNumbers(raffle, quantity);
+		if (!numbers) return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
+	}
+	
 	const formattedNumbers = numbers.map(formatTicketNumber);
 
 	const wallet = db.wallets[req.user.id] || { balance: 0 };
@@ -1723,6 +1752,40 @@ const buildUserTickets = (userId) => {
 
 app.get('/me/tickets', authMiddleware, (req, res) => {
 	return res.json(buildUserTickets(req.user.id));
+});
+
+app.post('/admin/push/broadcast', authMiddleware, adminMiddleware, async (req, res) => {
+	const { title, body } = req.body || {};
+	if (!title || !body) return res.status(400).json({ error: 'Título y mensaje requeridos' });
+
+	const tokens = db.users
+		.filter(u => u.pushToken && Expo.isExpoPushToken(u.pushToken))
+		.map(u => u.pushToken);
+
+	if (tokens.length === 0) return res.json({ message: 'No hay usuarios con token push registrado.' });
+
+	const messages = tokens.map(token => ({
+		to: token,
+		sound: 'default',
+		title,
+		body,
+		data: { withSome: 'data' },
+	}));
+
+	const chunks = expo.chunkPushNotifications(messages);
+	const tickets = [];
+	
+	for (const chunk of chunks) {
+		try {
+			const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+			tickets.push(...ticketChunk);
+		} catch (error) {
+			console.error(error);
+		}
+	}
+
+	logActivity({ action: 'admin.push.broadcast', userId: req.user.id, organizerId: req.user.organizerId, meta: { title, count: tokens.length } });
+	return res.json({ message: `Enviado a ${tokens.length} dispositivos.` });
 });
 
 app.use((req, res) => {
