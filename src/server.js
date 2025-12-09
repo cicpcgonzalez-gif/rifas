@@ -143,6 +143,7 @@ const seedDemoRaffles = (creatorId) => {
 			description: 'Premios tech y gadgets cada semana.',
 			price: 5,
 			totalTickets: 500,
+			digits: 4,
 			style: {
 				bannerImage: 'https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=1000&q=60',
 				themeColor: '#2563eb',
@@ -217,7 +218,7 @@ app.use((req, res, next) => {
 const superAdminUser = seedSuperAdmin();
 
 const sanitizeNumber = (value) => Number.parseInt(value, 10);
-const formatTicketNumber = (value) => String(value).padStart(4, '0');
+const formatTicketNumber = (value, digits = 4) => String(value).padStart(digits, '0');
 const parseTicketNumber = (value) => {
 	const parsed = Number.parseInt(value, 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -253,16 +254,33 @@ const allocateRandomNumbers = (raffle, quantity) => {
 	const available = capacity - assigned.size;
 	if (!Number.isFinite(quantity) || quantity <= 0) return null;
 	if (quantity > available) return null;
-	const pool = [];
-	for (let i = 1; i <= capacity; i += 1) {
-		if (!assigned.has(i)) pool.push(i);
-	}
+
 	const numbers = [];
-	for (let i = 0; i < quantity; i += 1) {
-		const idx = Math.floor(Math.random() * pool.length);
-		numbers.push(pool[idx]);
-		pool.splice(idx, 1);
+	
+	// Optimization: Use rejection sampling for large capacities to avoid OOM
+	if (capacity > 50000) {
+		const maxAttempts = quantity * 100; // Safety break
+		let attempts = 0;
+		while (numbers.length < quantity && attempts < maxAttempts) {
+			const num = Math.floor(Math.random() * capacity) + 1;
+			if (!assigned.has(num) && !numbers.includes(num)) {
+				numbers.push(num);
+			}
+			attempts++;
+		}
+		if (numbers.length < quantity) return null; // Should rarely happen unless full
+	} else {
+		const pool = [];
+		for (let i = 1; i <= capacity; i += 1) {
+			if (!assigned.has(i)) pool.push(i);
+		}
+		for (let i = 0; i < quantity; i += 1) {
+			const idx = Math.floor(Math.random() * pool.length);
+			numbers.push(pool[idx]);
+			pool.splice(idx, 1);
+		}
 	}
+	
 	numbers.sort((a, b) => a - b);
 	return numbers;
 };
@@ -1231,7 +1249,7 @@ app.get('/admin/raffles', authMiddleware, adminMiddleware, (_req, res) => {
 });
 
 app.post('/raffles', authMiddleware, (req, res) => {
-	const { title, price, description = '', startDate, endDate, totalTickets, securityCode } = req.body || {};
+	const { title, price, description = '', startDate, endDate, totalTickets, securityCode, digits } = req.body || {};
 	const normalizedPrice = Number(price);
 	if (!title || !Number.isFinite(normalizedPrice) || normalizedPrice <= 0) {
 		return res.status(400).json({ error: 'Titulo y precio valido son requeridos' });
@@ -1249,6 +1267,7 @@ app.post('/raffles', authMiddleware, (req, res) => {
 	const normalizedCapacity = totalTickets ? Math.min(capacity, MAX_TICKETS) : MAX_TICKETS;
 	const startIso = startDate ? new Date(startDate).toISOString() : new Date().toISOString();
 	const endIso = endDate ? new Date(endDate).toISOString() : null;
+	const raffleDigits = digits === 7 ? 7 : 4;
 
 	const raffle = {
 		id: uuid(),
@@ -1264,6 +1283,7 @@ app.post('/raffles', authMiddleware, (req, res) => {
 		startDate: startIso,
 		endDate: endIso,
 		totalTickets: normalizedCapacity,
+		digits: raffleDigits,
 		style: {
 			bannerImage: '',
 			themeColor: '#2563eb',
@@ -1316,7 +1336,7 @@ app.post('/raffles/:id/purchase', authMiddleware, (req, res) => {
 		if (!numbers) return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
 	}
 	
-	const formattedNumbers = numbers.map(formatTicketNumber);
+	const formattedNumbers = numbers.map(n => formatTicketNumber(n, raffle.digits || 4));
 
 	const wallet = db.wallets[req.user.id] || { balance: 0 };
 	const total = raffle.price * quantity;
@@ -1661,7 +1681,7 @@ app.post('/admin/manual-payments/:id/approve', authMiddleware, adminMiddleware, 
 	const organizer = db.users.find((u) => u.id === raffle.creatorId);
 	const numbers = allocateRandomNumbers(raffle, payment.quantity);
 	if (!numbers) return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
-	const formattedNumbers = numbers.map(formatTicketNumber);
+	const formattedNumbers = numbers.map(n => formatTicketNumber(n, raffle.digits || 4));
 	const userRecord = db.users.find((u) => u.id === payment.userId);
 	payment.status = 'approved';
 	payment.processedAt = Date.now();
@@ -1737,6 +1757,7 @@ const buildUserTickets = (userId) => {
 					number,
 					raffleId: p.raffleId,
 					raffleTitle: raffle?.title,
+					digits: raffle?.digits || 4,
 					createdAt: p.createdAt,
 					status: isWinner ? 'ganador' : isClosed ? 'perdedor' : baseStatus,
 					via: p.via || 'wallet'
