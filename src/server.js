@@ -217,7 +217,7 @@ app.use((req, res, next) => {
 const superAdminUser = seedSuperAdmin();
 
 const sanitizeNumber = (value) => Number.parseInt(value, 10);
-const formatTicketNumber = (value) => String(value).padStart(5, '0');
+const formatTicketNumber = (value) => String(value).padStart(4, '0');
 const parseTicketNumber = (value) => {
 	const parsed = Number.parseInt(value, 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
