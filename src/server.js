@@ -1863,6 +1863,38 @@ app.post('/admin/push/broadcast', authMiddleware, adminMiddleware, async (req, r
 	return res.json({ message: `Enviado a ${tokens.length} dispositivos.` });
 });
 
+// Endpoint de diagnóstico para Email (Temporal)
+app.get('/debug/test-email', async (req, res) => {
+	const { email } = req.query;
+	if (!email) return res.status(400).json({ error: 'Falta el parametro ?email=...' });
+	
+	const config = {
+		host: process.env.SMTP_HOST,
+		port: process.env.SMTP_PORT,
+		user: process.env.SMTP_USER,
+		secure: process.env.SMTP_SECURE,
+		from: getDefaultFrom(),
+		hasPass: !!process.env.SMTP_PASS
+	};
+
+	try {
+		const info = await mailer.sendMail({
+			from: config.from,
+			to: email,
+			subject: 'Prueba de Diagnóstico MegaRifas',
+			html: '<h1>Funciona!</h1><p>Si lees esto, el correo está bien configurado.</p>'
+		});
+		return res.json({ message: 'Correo enviado', info, config });
+	} catch (err) {
+		return res.status(500).json({ 
+			error: 'Fallo el envio', 
+			details: err.message, 
+			response: err.response,
+			config 
+		});
+	}
+});
+
 app.use((req, res) => {
 	res.status(404).json({ error: 'Ruta no encontrada' });
 });
