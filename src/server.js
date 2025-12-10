@@ -18,11 +18,11 @@ const ACCESS_TOKEN_TTL = '10m';
 const REFRESH_TOKEN_TTL = '30d';
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const MAX_TICKETS = 10000;
-const MAX_LOGIN_ATTEMPTS = 5;
-const LOGIN_BLOCK_WINDOW_MS = 15 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 4;
+const LOGIN_BLOCK_WINDOW_MS = 2 * 60 * 1000; // 2 minutos de bloqueo por email
 const VERIFY_BASE_URL = process.env.VERIFY_BASE_URL || 'https://megarifasapp.com/verify';
 const RATE_LIMITS = {
-	login: { windowMs: 5 * 60 * 1000, limit: 7 },
+	login: { windowMs: 2 * 60 * 1000, limit: 5 },
 	sensitive: { windowMs: 5 * 60 * 1000, limit: 30 }
 };
 
@@ -31,7 +31,7 @@ const db = {
 	users: [],
 	raffles: [],
 	purchases: [], // { id, raffleId, userId, numbers: [int], amount, buyer, status, createdAt, via }
-	manualPayments: [], // { id, raffleId, userId, quantity, status, proof, reference, note, createdAt, numbers? }
+	manualPayments: [], // { id, raffleId, userId, quantity, status, proof, reference, note, createdAt, numbers?, buyer?, processedAt? }
 	wallets: {}, // userId -> { balance }
 	loginAttempts: new Map(), // email -> { attempts, blockedUntil }
 	refreshTokens: new Map(), // token -> userId
@@ -45,10 +45,11 @@ const db = {
 
 const prisma = new PrismaClient();
 
-const createRateLimiter = (name, windowMs, limit) => {
+const createRateLimiter = (name, windowMs, limit, keySelector) => {
 	const bucket = new Map();
 	const middleware = (req, res, next) => {
-		const key = req.ip || req.headers['x-forwarded-for'] || 'global';
+		const keyFromSelector = keySelector ? keySelector(req) : null;
+		const key = keyFromSelector || req.ip || req.headers['x-forwarded-for'] || 'global';
 		const now = Date.now();
 		const entry = bucket.get(key) || { count: 0, resetAt: now + windowMs };
 		if (entry.resetAt < now) {
@@ -64,7 +65,12 @@ const createRateLimiter = (name, windowMs, limit) => {
 	return middleware;
 };
 
-const limitLogin = createRateLimiter('login', RATE_LIMITS.login.windowMs, RATE_LIMITS.login.limit);
+const limitLogin = createRateLimiter(
+	'login',
+	RATE_LIMITS.login.windowMs,
+	RATE_LIMITS.login.limit,
+	(req) => (req.body?.email ? String(req.body.email).toLowerCase() : null)
+);
 const limitSensitive = createRateLimiter('sensitive', RATE_LIMITS.sensitive.windowMs, RATE_LIMITS.sensitive.limit);
 
 // Seed demo user so it can iniciar sesión sin verificaciones extra.
@@ -705,8 +711,11 @@ app.post('/auth/login', limitLogin, (req, res) => {
 	if (!validateEmail(email)) return res.status(400).json({ error: 'Email invalido' });
 	const attempt = db.loginAttempts.get(email);
 	const now = Date.now();
-	if (attempt?.blockedUntil && attempt.blockedUntil > now)
-		return res.status(429).json({ error: 'Intentos excedidos, intenta más tarde' });
+	if (attempt?.blockedUntil && attempt.blockedUntil > now) {
+		const waitMs = attempt.blockedUntil - now;
+		const waitSec = Math.max(1, Math.ceil(waitMs / 1000));
+		return res.status(429).json({ error: `Intentos excedidos. Intenta en ${waitSec} segundos` });
+	}
 	const record = db.users.find((u) => u.email === email);
 	if (!record) {
 		registerFailedAttempt(email);
@@ -1432,15 +1441,16 @@ app.post('/raffles/:id/manual-payments', authMiddleware, (req, res) => {
 	if (raffle.status !== 'active') return res.status(400).json({ error: 'La rifa ya no esta activa' });
 
 	const quantity = sanitizeNumber(req.body?.quantity || 0);
-	const capacity = getRaffleCapacity(raffle);
 	if (!Number.isFinite(quantity) || quantity <= 0) return res.status(400).json({ error: 'Cantidad invalida' });
-	if (raffle.nextTicket + quantity - 1 > capacity)
-		return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
+
+	const capacity = getRaffleCapacity(raffle);
+	const assignedCount = getAssignedNumbers(raffle.id).size;
+	if (quantity > capacity - assignedCount) return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
 
 	const proof = req.body?.proof || '';
-	const reference = req.body?.reference || '';
+	const reference = String(req.body?.reference || '').trim();
 	const note = req.body?.note || '';
-
+	const buyer = snapshotBuyer(db.users.find((u) => u.id === req.user.id));
 	const payment = {
 		id: uuid(),
 		raffleId: raffle.id,
@@ -1449,12 +1459,14 @@ app.post('/raffles/:id/manual-payments', authMiddleware, (req, res) => {
 		status: 'pending',
 		proof,
 		reference,
-			note,
-			createdAt: Date.now()
+		note,
+		createdAt: Date.now(),
+		buyer
 	};
+
 	db.manualPayments.push(payment);
 	const actor = db.users.find((u) => u.id === req.user.id);
-	logActivity({ action: 'manualPayment.submit', userId: req.user.id, organizerId: actor?.organizerId, meta: { raffleId: raffle.id } });
+	logActivity({ action: 'manualPayment.submit', userId: req.user.id, organizerId: actor?.organizerId, meta: { raffleId: raffle.id, reference: reference || undefined } });
 
 	return res.status(201).json({ message: 'Pago enviado y pendiente de verificacion', payment });
 });
@@ -1475,10 +1487,18 @@ app.post('/raffles/:id/close', authMiddleware, (req, res) => {
 	const winnerTicket = tickets[Math.floor(Math.random() * tickets.length)];
 	raffle.status = 'closed';
 	raffle.winningTicketNumber = winnerTicket.number;
+	const winningPurchase = db.purchases.find((p) => p.raffleId === raffle.id && (p.numbers || []).includes(winnerTicket.number));
+	const winningUser = db.users.find((u) => u.id === winnerTicket.userId);
+	raffle.winnerSnapshot = {
+		ticketNumber: winnerTicket.number,
+		buyer: winningPurchase?.buyer || snapshotBuyer(winningUser),
+		userId: winnerTicket.userId,
+		announcedAt: Date.now()
+	};
 	const closer = db.users.find((u) => u.id === req.user.id);
 	logActivity({ action: 'raffle.close', userId: req.user.id, organizerId: closer?.organizerId, meta: { raffleId: raffle.id, winningTicket: winnerTicket.number } });
 
-	return res.json({ raffleId: raffle.id, winner: winnerTicket });
+	return res.json({ raffleId: raffle.id, winner: { ...winnerTicket, buyer: raffle.winnerSnapshot.buyer } });
 });
 
 // Admin o creador puede modificar estilo/imagenes promo de la rifa.
@@ -1503,8 +1523,21 @@ app.patch('/raffles/:id/style', authMiddleware, (req, res) => {
 });
 
 // Admin: listar pagos manuales pendientes/aprobados.
-app.get('/admin/manual-payments', authMiddleware, adminMiddleware, (_req, res) => {
-	return res.json(db.manualPayments);
+app.get('/admin/manual-payments', authMiddleware, adminMiddleware, (req, res) => {
+	const { raffleId, status, reference, userId, phone, cedula } = req.query;
+	const ref = reference ? String(reference).toLowerCase() : null;
+	return res.json(
+		db.manualPayments.filter((p) => {
+			if (raffleId && p.raffleId !== raffleId) return false;
+			if (status && p.status !== status) return false;
+			if (userId && p.userId !== userId) return false;
+			if (ref && !String(p.reference || '').toLowerCase().includes(ref)) return false;
+			const buyer = p.buyer || {};
+			if (phone && buyer.phone && !String(buyer.phone).includes(phone)) return false;
+			if (cedula && buyer.cedula && !String(buyer.cedula).includes(cedula)) return false;
+			return true;
+		})
+	);
 });
 
 // Admin: estado de código de seguridad.
@@ -1616,7 +1649,8 @@ const buildTicketRows = () => {
 				raffleTitle: raffle?.title,
 				number: null,
 				status: m.status,
-				buyer: snapshotBuyer(db.users.find((u) => u.id === m.userId)),
+				buyer: m.buyer || snapshotBuyer(db.users.find((u) => u.id === m.userId)),
+				reference: m.reference,
 				createdAt: m.createdAt,
 				via: 'manual'
 			});
@@ -1626,19 +1660,27 @@ const buildTicketRows = () => {
 };
 
 app.get('/admin/tickets', authMiddleware, adminMiddleware, (req, res) => {
-	const { raffleId, status, from, to, format } = req.query;
+	const { raffleId, status, from, to, format, phone, cedula, reference, email } = req.query;
 	const fromTs = from ? Date.parse(from) : null;
 	const toTs = to ? Date.parse(to) : null;
+	const ref = reference ? String(reference).toLowerCase() : null;
+	const mail = email ? String(email).toLowerCase() : null;
+
 	const rows = buildTicketRows().filter((row) => {
 		if (raffleId && row.raffleId !== raffleId) return false;
 		if (status && row.status !== status) return false;
 		if (fromTs && (!row.createdAt || row.createdAt < fromTs)) return false;
 		if (toTs && (!row.createdAt || row.createdAt > toTs)) return false;
+		const buyer = row.buyer || {};
+		if (phone && buyer.phone && !String(buyer.phone).includes(phone)) return false;
+		if (cedula && buyer.cedula && !String(buyer.cedula).includes(cedula)) return false;
+		if (ref && row.reference && !String(row.reference).toLowerCase().includes(ref)) return false;
+		if (mail && buyer.email && !String(buyer.email).toLowerCase().includes(mail)) return false;
 		return true;
 	});
 
 	if (format === 'csv' || format === 'excel') {
-		const header = 'raffleId,raffleTitle,ticketNumber,status,firstName,lastName,email,phone,cedula,via,createdAt\n';
+		const header = 'raffleId,raffleTitle,ticketNumber,status,firstName,lastName,email,phone,cedula,reference,via,createdAt\n';
 		const body = rows
 			.map((row) => {
 				const buyer = row.buyer || {};
@@ -1652,6 +1694,7 @@ app.get('/admin/tickets', authMiddleware, adminMiddleware, (req, res) => {
 					buyer.email || '',
 					buyer.phone || '',
 					buyer.cedula || '',
+					row.reference || '',
 					row.via,
 					row.createdAt ? new Date(row.createdAt).toISOString() : ''
 				]
@@ -1681,7 +1724,7 @@ app.post('/admin/manual-payments/:id/approve', authMiddleware, adminMiddleware, 
 	const organizer = db.users.find((u) => u.id === raffle.creatorId);
 	const numbers = allocateRandomNumbers(raffle, payment.quantity);
 	if (!numbers) return res.status(400).json({ error: 'No hay suficientes numeros disponibles' });
-	const formattedNumbers = numbers.map(n => formatTicketNumber(n, raffle.digits || 4));
+	const formattedNumbers = numbers.map((n) => formatTicketNumber(n, raffle.digits || 4));
 	const userRecord = db.users.find((u) => u.id === payment.userId);
 	payment.status = 'approved';
 	payment.processedAt = Date.now();
@@ -1694,6 +1737,7 @@ app.post('/admin/manual-payments/:id/approve', authMiddleware, adminMiddleware, 
 		userId: payment.userId,
 		numbers: formattedNumbers,
 		amount,
+		reference: payment.reference,
 		via: 'manual',
 		status: 'approved',
 		createdAt: Date.now(),
