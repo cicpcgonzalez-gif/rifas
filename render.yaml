@@ -26,4 +26,4 @@ services:
       - key: SMTP_PASS
         sync: false # Debes poner tu API Key de Resend aquí en el dashboard de Render
       - key: MAIL_FROM
-        value: onboarding@resend.dev # O tu dominio verificado si ya tienes uno
+        value: no-reply@send.megarifasapp.com
