@@ -14,3 +14,16 @@ services:
         value: supersecreto
       - key: PORT
         value: 3000
+      # Configuración de Email (Resend SMTP)
+      - key: SMTP_HOST
+        value: smtp.resend.com
+      - key: SMTP_PORT
+        value: 465
+      - key: SMTP_SECURE
+        value: true
+      - key: SMTP_USER
+        value: resend
+      - key: SMTP_PASS
+        sync: false # Debes poner tu API Key de Resend aquí en el dashboard de Render
+      - key: MAIL_FROM
+        value: onboarding@resend.dev # O tu dominio verificado si ya tienes uno
